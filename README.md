@@ -151,10 +151,6 @@ docs/screenshot-light.png            Screenshot der hellen Darstellung
 docs/screenshot-dark.png             Screenshot der dunklen Darstellung
 ```
 
-### Hinweis zur Umbenennung
-
-Das Projekt hieß früher `Exchange-HealthReport-Analyser` (mit „s"). Die Schreibweise wurde durchgängig auf **Analyzer** korrigiert (Dateiname, Logdateiname, Fenstertitel, HTML-Fußzeile, Repository). GitHub leitet die alte Repository-URL automatisch weiter.
-
 ### Mitwirken, Lizenz, Autor
 
 - Issues und Pull Requests: <https://github.com/RoccoAmmon/Exchange-HealthReport-Analyzer/issues>
@@ -295,10 +291,6 @@ LICENSE                              MIT license
 docs/screenshot-light.png            Light theme screenshot
 docs/screenshot-dark.png             Dark theme screenshot
 ```
-
-### Renaming note
-
-The project used to be called `Exchange-HealthReport-Analyser` (with an "s"). The spelling has been corrected to **Analyzer** throughout (file name, log file name, window title, HTML footer, repository). GitHub redirects the old repository URL automatically.
 
 ### Contributing, license, author
 
