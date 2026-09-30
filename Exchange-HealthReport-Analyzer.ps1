@@ -1,5 +1,6 @@
 ﻿#Requires -Version 5.1
-#Requires -RunAsAdministrator
+# Hinweis: KEIN #Requires -RunAsAdministrator - das Skript erhoeht sich unten
+# in "Selbst-Elevation" bei Bedarf selbst per UAC-Abfrage (inkl. Parameter).
 
 <#
 .SYNOPSIS
@@ -12,7 +13,14 @@
     Funktionen:
       * Initialer Scan via Get-HealthReport (Filter: AlertValue -ne 'Healthy')
       * Deep-Dive Analyse via Get-ServerHealth + passende ActiveMonitoring-Eventlogs
+        (Probe-/Monitor-/ResponderResult, ManagedAvailability/Monitoring,
+        RecoveryActionResults, Application-Log), inkl. Live-Probe
+        (Invoke-MonitoringProbe) als Fallback bei deaktivierten Logs
+      * Fehler zuerst: Relevanz-Ranking (Monitor-/Probe-Namen vor HealthSet/AppPool),
+        nur Fehler-Eintraege (ResultType 1/4, Level Fehler/Warnung), Infos kompakt
+      * Suchfenster (6/12/24/48/72h) in der GUI umschaltbar
       * Admin-Aktionen: Invoke-MonitoringProbe, Add-ServerMonitoringOverride, Quick Fix
+      * Selbst-Elevation per UAC-Abfrage inkl. Parameterweitergabe
       * HTML-Report-Export und Mail-Versand
       * Umschaltbare UI-Sprache (DE/EN) zur Laufzeit, Auto-Refresh, akzentuiertes Logging
 
@@ -29,7 +37,8 @@
     Gueltigkeitsdauer eines Monitoring-Overrides in Tagen. Standard: 30
 
 .PARAMETER EventLogHours
-    Zeitfenster (Stunden) fuer die Eventlog-Suche der ActiveMonitoring-Logs. Standard: 12
+    Zeitfenster (Stunden) fuer die Eventlog-Suche der ActiveMonitoring-Logs. Standard: 24
+    (in der GUI ueber das Suchfenster neben "Analysieren" umschaltbar: 6/12/24/48/72).
 
 .PARAMETER MaxEventsPerLog
     Maximale Anzahl gelesener Events pro ActiveMonitoring-Log. Standard: 300
@@ -49,8 +58,8 @@
 
 .NOTES
     Autor   : Rocco Ammon
-    Datum   : 2026-09-23
-    Version : 1.1.0
+    Datum   : 2026-09-30
+    Version : 1.1.6
     Hinweis : Muss auf einem Exchange-Server (administrativ) ausgefuehrt werden.
               Geprueft gegen Exchange Server 2019 / Subscription Edition (Managed Availability).
 #>
@@ -60,15 +69,56 @@ param(
     [string] $LogPath            = 'C:\ScriptLog',
     [int]    $AutoRefreshMinutes = 5,
     [int]    $OverrideDays       = 30,
-    [int]    $EventLogHours      = 12,
+    [int]    $EventLogHours      = 24,
     [int]    $MaxEventsPerLog    = 300,
     [ValidateSet('Light', 'Dark')]
     [string] $Theme              = 'Light'
 )
 
+#region Selbst-Elevation (Administratorrechte)
+# Exchange-Cmdlets, Eventlogs und Dienst-/AppPool-Aktionen brauchen erhoehte Rechte.
+# Ohne Adminrechte startet sich das Skript per UAC-Abfrage selbst neu und reicht
+# alle Parameter durch (danach endet die nicht erhoehte Instanz per exit).
+# Bei Ablehnung des UAC-Dialogs startet die erhoehte Instanz nicht - auch dann endet
+# diese Instanz hier, statt kommentarlos weiterzulaufen.
+try {
+    $elevIdentity  = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $elevPrincipal = New-Object System.Security.Principal.WindowsPrincipal($elevIdentity)
+    if (-not $elevPrincipal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        $invokedAsScript = ($MyInvocation.InvocationName -ne '.') -and (-not [string]::IsNullOrWhiteSpace($PSCommandPath)) -and (Test-Path -LiteralPath $PSCommandPath)
+        if ($invokedAsScript) {
+            $elevExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            $elevArgs = @(
+                '-NoProfile'
+                '-ExecutionPolicy Bypass'
+                '-STA'
+                ('-File "{0}"' -f $PSCommandPath)
+                ('-TargetServer "{0}"' -f $TargetServer)
+                ('-LogPath "{0}"' -f $LogPath)
+                ('-AutoRefreshMinutes {0}' -f $AutoRefreshMinutes)
+                ('-OverrideDays {0}' -f $OverrideDays)
+                ('-EventLogHours {0}' -f $EventLogHours)
+                ('-MaxEventsPerLog {0}' -f $MaxEventsPerLog)
+                ('-Theme {0}' -f $Theme)
+            )
+            try {
+                Start-Process -FilePath $elevExe -ArgumentList ($elevArgs -join ' ') -Verb RunAs -ErrorAction Stop
+            } catch {
+                Write-Host ('Administratorrechte erforderlich. Erhoehter Start abgebrochen: {0}' -f $_.Exception.Message) -ForegroundColor Red
+            }
+            exit
+        } else {
+            Write-Host 'Administratorrechte erforderlich. Bitte PowerShell als Administrator starten.' -ForegroundColor Yellow
+        }
+    }
+} catch {
+    Write-Host ('Admin-Pruefung fehlgeschlagen: {0}' -f $_.Exception.Message) -ForegroundColor Yellow
+}
+#endregion
+
 #region Konfiguration / Variablen
 $Script:Config = @{
-    AppVersion         = '1.1.0'
+    AppVersion         = '1.1.6'
     LogPath            = $LogPath
     LogFile            = (Join-Path $LogPath ('Exchange-HealthReport-Analyzer_{0:yyyyMMdd}.log' -f (Get-Date)))
     TargetServer       = if ([string]::IsNullOrWhiteSpace($TargetServer)) { $env:COMPUTERNAME } else { $TargetServer }
@@ -79,10 +129,17 @@ $Script:Config = @{
     Language           = 'DE'
     Theme              = $Theme
     # Debug-Logs der Managed Availability (Probe-/Monitor-/Responder-Ergebnisse)
+    # Hinweis: ProbeResult/MonitorResult/ResponderResult sind auf Produktivservern
+    # aus Performance-Gruenden oft deaktiviert (LogIsEnabled=False). Die eigentliche
+    # Eskalationsmeldung inkl. letztem Probe-Fehler steht in
+    # Microsoft-Exchange-ManagedAvailability/Monitoring - daher wird dieses Log
+    # immer mit abgefragt (Best Practice laut Microsoft-Doku).
     MonitoringLogs     = @(
         'Microsoft-Exchange-ActiveMonitoring/ProbeResult',
         'Microsoft-Exchange-ActiveMonitoring/MonitorResult',
-        'Microsoft-Exchange-ActiveMonitoring/ResponderResult'
+        'Microsoft-Exchange-ActiveMonitoring/ResponderResult',
+        'Microsoft-Exchange-ManagedAvailability/Monitoring',
+        'Microsoft-Exchange-ManagedAvailability/RecoveryActionResults'
     )
     # Reihenfolge: Subscription Edition zuerst, danach die klassische 2010er-Snapin
     ExchangeSnapins    = @(
@@ -192,6 +249,7 @@ $Script:QuickFixMap = @{
     'DatabaseAvailability' = @{ Services = @('MSExchangeRepl', 'MSExchangeIS');                       AppPools = @() }
     'MailboxDatabase'      = @{ Services = @('MSExchangeIS');                                         AppPools = @() }
     'HttpProxy'            = @{ Services = @('MSExchangeServiceHost');                                AppPools = @() }
+    'Rest'                 = @{ Services = @('W3SVC');              AppPools = @('MSExchangeRestAppPool') }
 }
 
 #endregion
@@ -206,6 +264,7 @@ $Script:T = @{
         ThemeLight            = 'Hell'
         ThemeDark             = 'Dunkel'
         ChkAutoRefresh        = 'Auto-Refresh ({0} Min)'
+        LblHours              = 'Suchfenster:'
         BtnScan               = 'Scan starten'
         BtnExportHtml         = 'Als HTML exportieren'
         BtnSendMail           = 'Report per Mail senden'
@@ -243,6 +302,25 @@ $Script:T = @{
         DetailsTarget         = 'Ziel         : {0}'
         DetailsLastChange     = 'Letzte Aend. : {0}'
         DetailsCounter        = 'Fehler/Count : {0}'
+        DetailsFirstFailed    = 'Erster Fehler : {0}'
+        DetailsLastExec       = 'Letzte Ausf. : {0} ({1})'
+        DetailsError          = 'Fehler       : {0}'
+        DetailsException      = 'Ausnahme     : {0}'
+        DetailsDescription    = 'Beschreibung : {0}'
+        DetailsProbeHint      = 'Tipp: Zugehoerige Probe manuell starten: Invoke-MonitoringProbe {0}\<ProbeName> -Server {1} | Format-List (Proben via Get-MonitoringItemIdentity -Identity {0} -Server {1} auflisten).'
+        DetailsFallbackEvents = 'Neueste Eintraege aus {0} (ohne direkten Monitorbezug, {1}):'
+        DetailsDisabledHint   = 'Hinweis: ProbeResult/MonitorResult/ResponderResult sind auf Produktivservern aus Performance-Gruenden oft deaktiviert. Aussagekraeftig ist Microsoft-Exchange-ManagedAvailability/Monitoring (enthaelt den letzten Probe-Fehler).'
+        DetailsStale          = 'Status          : Monitorwert ist veraltet (IsStale=True) - Health Manager hat den Monitor seit laengerer Zeit nicht aktualisiert.'
+        DetailsExtended       = 'Details        : {0}'
+        DetailsProbes         = 'Proben         : {0}'
+        DetailsLiveProbe      = 'Live-Probe (direkt ausgefuehrt):'
+        DetailsLiveOk         = 'Probe erfolgreich, kein Fehlertext (Monitor ggf. noch nicht zurueckgesetzt).'
+        DetailsErrorEvents    = 'Fehler-Eintraege ({0}):'
+        DetailsInfoEvents     = 'Info-Eintraege ({0}, kein Fehler im Zeitfenster):'
+        DetailsHiddenInfo     = '(+ {0} weitere Informations-Eintraege ausgeblendet.)'
+        DetailsNoEventsRead   = 'Keine Events lesbar: alle abgefragten Logs sind deaktiviert oder leer im Zeitfenster ({0}h). Siehe Live-Probe oben und Hinweise unten.'
+        DetailsProbeHintConcrete = 'Tipp: Probe manuell starten: Invoke-MonitoringProbe {0} -Server {1} | Format-List'
+        DetailsEnableLogsHint = 'Tipp: ManagedAvailability-Logs reaktivieren (erhoehtes Aufkommen beachten): wevtutil sl "Microsoft-Exchange-ManagedAvailability/Monitoring" /e:true ; wevtutil sl "Microsoft-Exchange-ActiveMonitoring/ProbeResult" /e:true'
         DetailsEvents         = 'Passende Eventlogs ({0}):'
         DetailsNoEvents       = 'Keine passenden Eventlogs im gewaehlten Zeitfenster gefunden.'
         DetailsErrors         = 'Hinweise/Fehler bei der Analyse:'
@@ -291,6 +369,7 @@ $Script:T = @{
         ThemeLight            = 'Light'
         ThemeDark             = 'Dark'
         ChkAutoRefresh        = 'Auto-refresh ({0} min)'
+        LblHours              = 'Time window:'
         BtnScan               = 'Start scan'
         BtnExportHtml         = 'Export as HTML'
         BtnSendMail           = 'Send report by mail'
@@ -328,6 +407,25 @@ $Script:T = @{
         DetailsTarget         = 'Target       : {0}'
         DetailsLastChange     = 'Last change  : {0}'
         DetailsCounter        = 'Failures     : {0}'
+        DetailsFirstFailed    = 'First failure : {0}'
+        DetailsLastExec       = 'Last run      : {0} ({1})'
+        DetailsError          = 'Error         : {0}'
+        DetailsException      = 'Exception     : {0}'
+        DetailsDescription    = 'Description   : {0}'
+        DetailsProbeHint      = 'Tip: run the related probe manually: Invoke-MonitoringProbe {0}\<ProbeName> -Server {1} | Format-List (list probes via Get-MonitoringItemIdentity -Identity {0} -Server {1}).'
+        DetailsFallbackEvents = 'Most recent entries from {0} (no direct monitor match, {1}):'
+        DetailsDisabledHint   = 'Note: ProbeResult/MonitorResult/ResponderResult are often disabled on production servers for performance reasons. Microsoft-Exchange-ManagedAvailability/Monitoring is authoritative (contains the most recent probe error).'
+        DetailsStale          = 'Status          : Monitor value is stale (IsStale=True) - Health Manager has not updated the monitor for a while.'
+        DetailsExtended       = 'Details        : {0}'
+        DetailsProbes         = 'Probes         : {0}'
+        DetailsLiveProbe      = 'Live probe (executed directly):'
+        DetailsLiveOk         = 'Probe succeeded, no error text (monitor may not have reset yet).'
+        DetailsErrorEvents    = 'Error entries ({0}):'
+        DetailsInfoEvents     = 'Informational entries ({0}, no error in time window):'
+        DetailsHiddenInfo     = '(+ {0} further informational entries hidden.)'
+        DetailsNoEventsRead   = 'No events readable: all queried logs are disabled or empty in the time window ({0}h). See live probe above and hints below.'
+        DetailsProbeHintConcrete = 'Tip: run the probe manually: Invoke-MonitoringProbe {0} -Server {1} | Format-List'
+        DetailsEnableLogsHint = 'Tip: re-enable ManagedAvailability logs (expect higher volume): wevtutil sl "Microsoft-Exchange-ManagedAvailability/Monitoring" /e:true ; wevtutil sl "Microsoft-Exchange-ActiveMonitoring/ProbeResult" /e:true'
         DetailsEvents         = 'Matching event log entries ({0}):'
         DetailsNoEvents       = 'No matching event log entries found in the selected time frame.'
         DetailsErrors         = 'Warnings/errors during analysis:'
@@ -484,7 +582,7 @@ function Set-Busy {
     try {
         $Script:State.Busy = $Active
         if ($Active) { $Script:State.BusyKey = $TextKey }
-        foreach ($name in @('BtnScan', 'BtnExportHtml', 'BtnSendMail', 'BtnAnalyse', 'BtnRetest', 'BtnOverride', 'BtnQuickFix')) {
+        foreach ($name in @('BtnScan', 'BtnExportHtml', 'BtnSendMail', 'BtnAnalyse', 'BtnRetest', 'BtnOverride', 'BtnQuickFix', 'CmbHours')) {
             if ($Script:Ui[$name]) { $Script:Ui[$name].IsEnabled = (-not $Active) }
         }
         if ($Script:Ui['TxtBusy']) {
@@ -563,6 +661,9 @@ function Test-StaApartment {
             ('-LogPath "{0}"' -f $Script:Config.LogPath)
             ('-AutoRefreshMinutes {0}' -f $Script:Config.AutoRefreshMinutes)
             ('-OverrideDays {0}' -f $Script:Config.OverrideDays)
+            ('-EventLogHours {0}' -f $Script:Config.EventLogHours)
+            ('-MaxEventsPerLog {0}' -f $Script:Config.MaxEventsPerLog)
+            ('-Theme {0}' -f $Script:Config.Theme)
         )
         Start-Process -FilePath $exe -ArgumentList ($arguments -join ' ')
         return $false
@@ -946,8 +1047,18 @@ $Script:MainXaml = @'
 
         <!-- Admin-Aktionen -->
         <Border x:Name="ActionBorder" Grid.Row="3" Style="{StaticResource PanelBorder}" Margin="0,8,0,0">
-            <WrapPanel Orientation="Horizontal">
+            <WrapPanel Orientation="Horizontal" VerticalAlignment="Center">
                 <Button x:Name="BtnAnalyse" Style="{StaticResource ToolButton}" Content="Analyse" Background="#FF2D7DD2"/>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,8,0">
+                    <TextBlock x:Name="LblHours" VerticalAlignment="Center" Margin="0,0,8,0" Text="Time window:"/>
+                    <ComboBox x:Name="CmbHours" Width="95" Height="28" SelectedIndex="2" Style="{StaticResource ThemedCombo}" ToolTip="Eventlog-Suchfenster in Stunden">
+                        <ComboBoxItem Content="6 h"/>
+                        <ComboBoxItem Content="12 h"/>
+                        <ComboBoxItem Content="24 h"/>
+                        <ComboBoxItem Content="48 h"/>
+                        <ComboBoxItem Content="72 h"/>
+                    </ComboBox>
+                </StackPanel>
                 <Button x:Name="BtnRetest" Style="{StaticResource ToolButton}" Content="Re-Test" Background="#FFC98A21"/>
                 <Button x:Name="BtnOverride" Style="{StaticResource ToolButton}" Content="Override" Background="#FFB04A4A"/>
                 <Button x:Name="BtnQuickFix" Style="{StaticResource ToolButton}" Content="Quick Fix" Background="#FF3E8E5A"/>
@@ -1036,6 +1147,7 @@ function Show-MainWindow {
             'BtnScan', 'BtnExportHtml', 'BtnSendMail', 'TxtBusy', 'PrgBusy',
             'GrpUnhealthy', 'DgUnhealthy', 'GrpDetails', 'TxtDetails',
             'BtnAnalyse', 'BtnRetest', 'BtnOverride', 'BtnQuickFix',
+            'LblHours', 'CmbHours',
             'TxtStatus', 'TxtRightInfo',
             'HeaderBorder', 'ToolbarBorder', 'ActionBorder', 'StatusBorder'
         )
@@ -1048,6 +1160,11 @@ function Show-MainWindow {
         $Script:Ui['TxtServer'].Text = $Script:Config.TargetServer
         $Script:Ui['TxtDetails'].Text = Get-Text -Key 'DetailsPlaceholder'
         $Script:Ui['DgUnhealthy'].ItemsSource = $null
+        # Suchfenster-Vorauswahl aus der Konfiguration (-EventLogHours)
+        try {
+            $hoursIndex = @('6', '12', '24', '48', '72').IndexOf([string]$Script:Config.EventLogHours)
+            $Script:Ui['CmbHours'].SelectedIndex = $(if ($hoursIndex -ge 0) { $hoursIndex } else { 2 })
+        } catch { }
 
         Register-UiEvents -Window $window
         Set-UiTheme -Theme $Script:Config.Theme
@@ -1099,6 +1216,22 @@ function Register-UiEvents {
                 Set-UiTheme -Theme $(if ($index -eq 1) { 'Dark' } else { 'Light' })
             } catch {
                 Write-Log -Message ('Darstellungswechsel: {0}' -f $_.Exception.Message) -Level 'WARN'
+            }
+        })
+
+        # Suchfenster umschalten (Eventlog-Zeitraum fuer "Analysieren")
+        $ui['CmbHours'].Add_SelectionChanged({
+            try {
+                $item = $Script:Ui['CmbHours'].SelectedItem
+                if ($item -and $item.Content) {
+                    $digits = ([string]$item.Content) -replace '[^0-9]', ''
+                    if ($digits -match '^[0-9]+$') {
+                        $Script:Config.EventLogHours = [Math]::Max(1, [int]$digits)
+                        Write-Log -Message ('Suchfenster geaendert: {0}h.' -f $Script:Config.EventLogHours) -Level 'DEBUG'
+                    }
+                }
+            } catch {
+                Write-Log -Message ('Suchfensterwechsel: {0}' -f $_.Exception.Message) -Level 'WARN'
             }
         })
 
@@ -1162,6 +1295,7 @@ function Set-UiLanguage {
         $ui['BtnExportHtml'].Content = Get-Text -Key 'BtnExportHtml'
         $ui['BtnSendMail'].Content = Get-Text -Key 'BtnSendMail'
         $ui['BtnAnalyse'].Content  = Get-Text -Key 'BtnAnalyse'
+        $ui['LblHours'].Text       = Get-Text -Key 'LblHours'
         $ui['BtnRetest'].Content   = Get-Text -Key 'BtnRetest'
         $ui['BtnOverride'].Content = Get-TextF -Key 'BtnOverride' -Arguments @($Script:Config.OverrideDays)
         $ui['BtnQuickFix'].Content = Get-Text -Key 'BtnQuickFix'
@@ -1317,7 +1451,7 @@ function Set-UiTheme {
         if ($ui['TxtRightInfo']) { $ui['TxtRightInfo'].Foreground = $brushes['AccentFg'] }
         if ($ui['TxtStatus'])   { $ui['TxtStatus'].Foreground = $brushes['TextFg'] }
 
-        foreach ($comboName in @('CmbLanguage', 'CmbTheme')) {
+        foreach ($comboName in @('CmbLanguage', 'CmbTheme', 'CmbHours')) {
             $combo = $ui[$comboName]
             if ($combo) {
                 $combo.Background  = $brushes['InputBg']
@@ -1782,49 +1916,146 @@ function Invoke-DeepDive {
 
         $analysisScript = @'
 param([string]$Server, [string]$HealthSet, [int]$LogHours, [int]$MaxEvents, [string[]]$LogNames)
-$result = @{ HealthSet = $HealthSet; Server = $Server; Monitors = @(); Events = @(); Errors = @(); Logs = $LogNames }
+$result = @{ HealthSet = $HealthSet; Server = $Server; Monitors = @(); Events = @(); Errors = @(); Logs = $LogNames; Probes = @(); ProbeRuns = @() }
 
 # Lokal ohne -ComputerName arbeiten (schneller und robuster als der Loopback-Weg)
 $localName = $env:COMPUTERNAME
 $isRemote  = $Server -and ($Server -ne $localName) -and ($Server -ne 'localhost') -and ($Server -ne '127.0.0.1') -and ($Server -ne '.')
 
-# 1) Ungesunde Monitore des HealthSets ermitteln
+function Get-PropValue($obj, [string[]]$names) {
+    foreach ($n in $names) {
+        try {
+            if ($obj.PSObject.Properties[$n] -and $null -ne $obj.$n -and ([string]$obj.$n) -ne '') { return [string]$obj.$n }
+        } catch { }
+    }
+    return ''
+}
+function Get-TimeValue($obj, [string[]]$names) {
+    foreach ($n in $names) {
+        try {
+            if ($obj.PSObject.Properties[$n] -and $obj.$n) {
+                $dt = [datetime]$obj.$n
+                if ($dt.Year -gt 1900) { return $dt.ToString('yyyy-MM-dd HH:mm') }
+            }
+        } catch { }
+    }
+    return ''
+}
+
+# 1) Ungesunde Monitore des HealthSets ermitteln.
+# Hinweis: Get-ServerHealth kennt KEIN RepeatCount/RedAlertCount (das sind
+# Get-HealthReport-Felder). Die echten Fehlerdetails stehen in Error, Exception,
+# Description, LastExecutionResult, FirstAlertObservedTime u. a. Zusaetzlich
+# werden alle sonstigen nicht-leeren Properties als Extended-String
+# mitgeschleppt, damit bei SE-Abweichungen nichts verloren geht.
+$knownProps = @('Name','AlertValue','TargetResource','HealthSetName','HealthGroupName','LastTransitionTime','FirstFailedTime','FirstAlertObservedTime','LastExecutionTime','LastExecutionResult','Description','HealthSetDescription','Error','Exception','IsStale','RepeatCount','RedAlertCount')
 try {
     $monitors = @(Get-ServerHealth -Identity $Server -HealthSet $HealthSet -ErrorAction Stop)
     $unhealthy = @($monitors | Where-Object { [string]$_.AlertValue -ne 'Healthy' })
     $result.Monitors = @($unhealthy | ForEach-Object {
-        $transition = ''
-        if ($_.PSObject.Properties['LastTransitionTime'] -and $_.LastTransitionTime) {
-            $transition = ([datetime]$_.LastTransitionTime).ToString('yyyy-MM-dd HH:mm')
-        }
-        $failed = ''
-        if ($_.PSObject.Properties['FirstFailedTime'] -and $_.FirstFailedTime) {
-            $failed = ([datetime]$_.FirstFailedTime).ToString('yyyy-MM-dd HH:mm')
+        $extra = @()
+        # Interne IDs sind Rauschen (ResultId, WorkItemId, ...), keine Diagnoseinfo
+        $noiseProps = @('Identity', 'ResultId', 'WorkItemId', 'IsValid', 'ObjectState', 'ServicePriority', 'DefinitionCreatedTime')
+        foreach ($p in $_.PSObject.Properties) {
+            try {
+                if ($knownProps -contains $p.Name) { continue }
+                if ($noiseProps -contains $p.Name) { continue }
+                if ($null -eq $p.Value) { continue }
+                $v = ([string]$p.Value).Trim()
+                if ($v -eq '' -or $v -eq '1/1/0001 12:00:00 AM' -or $v -eq '01.01.0001 00:00:00') { continue }
+                if ($v.Length -gt 300) { $v = $v.Substring(0, 300) + ' ...' }
+                $extra += ('{0}={1}' -f $p.Name, ($v -replace "`r?`n", ' '))
+            } catch { }
         }
         [pscustomobject]@{
-            Name               = [string]$_.Name
-            AlertValue         = [string]$_.AlertValue
-            LastTransitionTime = $transition
-            FirstFailedTime    = $failed
-            TargetResource     = [string]$_.TargetResource
-            RepeatCount        = $_.RepeatCount
-            RedAlertCount      = $_.RedAlertCount
+            Name                 = Get-PropValue $_ @('Name')
+            AlertValue           = Get-PropValue $_ @('AlertValue')
+            TargetResource       = Get-PropValue $_ @('TargetResource')
+            HealthSetName        = Get-PropValue $_ @('HealthSetName')
+            HealthGroupName      = Get-PropValue $_ @('HealthGroupName')
+            LastTransitionTime   = Get-TimeValue $_ @('LastTransitionTime')
+            FirstFailedTime      = Get-TimeValue $_ @('FirstFailedTime', 'FirstAlertObservedTime')
+            LastExecutionTime    = Get-TimeValue $_ @('LastExecutionTime')
+            LastExecutionResult  = Get-PropValue $_ @('LastExecutionResult')
+            Description          = Get-PropValue $_ @('Description', 'HealthSetDescription')
+            Error                = Get-PropValue $_ @('Error')
+            Exception            = Get-PropValue $_ @('Exception')
+            IsStale              = Get-PropValue $_ @('IsStale')
+            RepeatCount          = Get-PropValue $_ @('RepeatCount', 'RedAlertCount')
+            Extended             = ($extra -join ' | ')
         }
     })
 } catch {
     $result.Errors += ('Get-ServerHealth: {0}' -f $_.Exception.Message)
 }
 
-# 2) Passende Eventlogs der Managed Availability auslesen
+# 1b) Proben des HealthSets auflisten (fuer konkrete Invoke-Befehle und Live-Fallback).
+try {
+    $items = @(Get-MonitoringItemIdentity -Identity $HealthSet -Server $Server -ErrorAction Stop)
+    $result.Probes = @($items | Where-Object { [string]$_.ItemType -eq 'Probe' } | ForEach-Object {
+        [pscustomobject]@{
+            Name = Get-PropValue $_ @('Name')
+            Identity = Get-PropValue $_ @('Identity')
+            TargetResource = Get-PropValue $_ @('TargetResource')
+        }
+    })
+} catch {
+    $result.Errors += ('Get-MonitoringItemIdentity: {0}' -f $_.Exception.Message)
+}
+
+# 1c) Live-Probe als Fallback: liefert den echten Fehler auch bei deaktivierten Logs.
+# Nur max. 2 passende Probes (DeepTest zuerst), damit kein Massenlauf entsteht.
+try {
+    foreach ($mon in @($result.Monitors)) {
+        $monitorBase = ([string]$mon.Name) -replace '\.?(Monitor|Responder)$', ''
+        $candidates = @($result.Probes | Where-Object { ([string]$_.Name) -like ('*{0}*' -f $monitorBase) })
+        if (@($candidates).Count -eq 0) {
+            $candidates = @($result.Probes | Where-Object { ([string]$_.Name) -like '*DeepTest*' } | Select-Object -First 1)
+        }
+        $candidates = @($candidates | Select-Object -First 2)
+        foreach ($probe in $candidates) {
+            $identity = [string]$probe.Identity
+            if ([string]::IsNullOrWhiteSpace($identity)) {
+                if ([string]::IsNullOrWhiteSpace([string]$probe.Name)) { continue }
+                $identity = '{0}\{1}' -f $HealthSet, [string]$probe.Name
+            }
+            if (@($result.ProbeRuns | Where-Object { $_.Identity -eq $identity }).Count -gt 0) { continue }
+            try {
+                $pr = Invoke-MonitoringProbe -Identity $identity -Server $Server -ErrorAction Stop
+                $value = Get-PropValue $pr @('ProbeResult', 'Result')
+                $errText = Get-PropValue $pr @('Error', 'Exception', 'FailureDetail')
+                if ($value.Length -gt 800) { $value = $value.Substring(0, 800) + ' ...' }
+                if ($errText.Length -gt 1500) { $errText = $errText.Substring(0, 1500) + ' ...' }
+                $result.ProbeRuns += @([pscustomobject]@{ Identity = $identity; Status = 'OK'; Result = $value; Error = ($errText -replace "`r?`n", ' ') })
+            } catch {
+                $msg = [string]$_.Exception.Message
+                # Nicht manuell startbare Probes (z. B. DatabaseSpaceProbe) still
+                # uebergehen - kein verwirrender [ERROR]-Eintrag in der Anzeige
+                if ($msg -match "(?i)(can't be used|cannot be run|not be run|Could not find assembly)") { continue }
+                $result.ProbeRuns += @([pscustomobject]@{ Identity = $identity; Status = 'ERROR'; Result = ''; Error = ($msg -replace "`r?`n", ' ') })
+            }
+        }
+    }
+} catch {
+    $result.Errors += ('Invoke-MonitoringProbe (Fallback): {0}' -f $_.Exception.Message)
+}
+
+# 2) Passende Eventlogs der Managed Availability auslesen.
+# ProbeResult/MonitorResult/ResponderResult sind auf Produktivservern oft
+# deaktiviert (Performance). Microsoft-Exchange-ManagedAvailability/Monitoring
+# enthaelt die Eskalationsmeldung inkl. letztem Probe-Fehler und ist daher
+# die wichtigste Quelle. Deaktivierte Logs werden trotzdem leseversucht
+# (alte Events koennen noch vorhanden sein) und nur als Hinweis vermerkt.
 $since = (Get-Date).AddHours(-1 * [Math]::Max(1, $LogHours))
 $events = New-Object System.Collections.ArrayList
-foreach ($logName in $LogNames) {
-    # Log vorab pruefen (deaktiviertes Log liefert sonst nur leere Treffer)
+$logsToRead = @($LogNames) + @('Application')
+foreach ($logName in ($logsToRead | Select-Object -Unique)) {
+    $isAppLog = ($logName -eq 'Application')
+    # Log vorab pruefen (nur Hinweis, kein Skip - alte Events bleiben lesbar)
     try {
         $logInfo = if ($isRemote) { Get-WinEvent -ListLog $logName -ComputerName $Server -ErrorAction Stop } else { Get-WinEvent -ListLog $logName -ErrorAction Stop }
         if ($logInfo -and -not $logInfo.LogIsEnabled) {
             $result.Errors += ('{0}: Log deaktiviert (LogIsEnabled=False)' -f $logName)
-            continue
         }
     } catch {
         # Log nicht vorhanden oder nicht lesbar - wird beim Auslesen erneut gemeldet
@@ -1832,7 +2063,12 @@ foreach ($logName in $LogNames) {
 
     $evts = @()
     try {
-        $filter = @{ LogName = $logName; StartTime = $since }
+        if ($isAppLog) {
+            # Application-Log: nur Fehler/Warnungen im Zeitfenster (sonst zu viel Rauschen)
+            $filter = @{ LogName = $logName; StartTime = $since; Level = @(1, 2, 3) }
+        } else {
+            $filter = @{ LogName = $logName; StartTime = $since }
+        }
         if ($isRemote) { $evts = @(Get-WinEvent -ComputerName $Server -FilterHashtable $filter -MaxEvents $MaxEvents -ErrorAction Stop) }
         else           { $evts = @(Get-WinEvent -FilterHashtable $filter -MaxEvents $MaxEvents -ErrorAction Stop) }
     } catch {
@@ -1850,6 +2086,24 @@ foreach ($logName in $LogNames) {
         $message = [string]$e.Message
         if ($message.Length -gt 1500) { $message = $message.Substring(0, 1500) + ' ...' }
         $message = $message -replace "`r?`n", ' '
+        # Echter Fehlertext steckt bei ActiveMonitoring-Events im XML (Error,
+        # Exception, ResultName) - Message allein ist oft nur generisch
+        # ("Probe result (Name=...)"). Daher XML-Details mit auslesen.
+        $detail = ''
+        try {
+            $xml = [xml]$e.ToXml()
+            $nodes = @($xml.SelectNodes('//*[local-name()="Error" or local-name()="Exception" or local-name()="ResultName" or local-name()="MonitorName" or local-name()="ProbeName" or local-name()="ResultType"]'))
+            $parts = @()
+            foreach ($n in $nodes) {
+                $t = ([string]$n.InnerText).Trim() -replace "`r?`n", ' '
+                if ($t -and $t.Length -gt 0) {
+                    if ($t.Length -gt 800) { $t = $t.Substring(0, 800) + ' ...' }
+                    $parts += ('{0}={1}' -f $n.LocalName, $t)
+                }
+            }
+            $detail = ($parts | Select-Object -Unique) -join ' | '
+            if ($detail.Length -gt 1500) { $detail = $detail.Substring(0, 1500) + ' ...' }
+        } catch { $detail = '' }
         $timeCreated = ''
         if ($e.PSObject.Properties['TimeCreated'] -and $e.TimeCreated) {
             $timeCreated = ([datetime]$e.TimeCreated).ToString('yyyy-MM-dd HH:mm:ss')
@@ -1860,6 +2114,7 @@ foreach ($logName in $LogNames) {
             Level       = [string]$e.LevelDisplayName
             Id          = $e.Id
             Message     = $message
+            Detail      = $detail
         })
     }
 }
@@ -1920,6 +2175,7 @@ function Show-AnalyseResult {
             [void]$sb.AppendLine('')
             [void]$sb.AppendLine((Get-Text -Key 'DetailsNoEvents'))
         }
+        $errTotal = 0
 
         foreach ($monitor in $monitors) {
             [void]$sb.AppendLine('')
@@ -1928,43 +2184,189 @@ function Show-AnalyseResult {
             [void]$sb.AppendLine((Get-TextF -Key 'DetailsStatus' -Arguments @($monitor.AlertValue)))
             [void]$sb.AppendLine((Get-TextF -Key 'DetailsTarget' -Arguments @($monitor.TargetResource)))
             [void]$sb.AppendLine((Get-TextF -Key 'DetailsLastChange' -Arguments @($monitor.LastTransitionTime)))
-            [void]$sb.AppendLine((Get-TextF -Key 'DetailsCounter' -Arguments @($monitor.RepeatCount)))
+            if ($monitor.FirstFailedTime) {
+                [void]$sb.AppendLine((Get-TextF -Key 'DetailsFirstFailed' -Arguments @($monitor.FirstFailedTime)))
+            }
+            if ($monitor.LastExecutionTime -or $monitor.LastExecutionResult) {
+                [void]$sb.AppendLine((Get-TextF -Key 'DetailsLastExec' -Arguments @($monitor.LastExecutionTime, $monitor.LastExecutionResult)))
+            }
+            # Get-ServerHealth kennt kein RepeatCount (Get-HealthReport-Feld).
+            # Fallback: Wert aus der Scan-Zeile uebernehmen, sonst als n/a kennzeichnen.
+            $counter = [string]$monitor.RepeatCount
+            if ([string]::IsNullOrWhiteSpace($counter) -and $Script:State.Selected -and $Script:State.Selected.PSObject.Properties['RepeatCount'] -and $null -ne $Script:State.Selected.RepeatCount) {
+                $counter = [string]$Script:State.Selected.RepeatCount
+            }
+            if ([string]::IsNullOrWhiteSpace($counter)) { $counter = 'n/a' }
+            [void]$sb.AppendLine((Get-TextF -Key 'DetailsCounter' -Arguments @($counter)))
+            if ($monitor.Description) { [void]$sb.AppendLine((Get-TextF -Key 'DetailsDescription' -Arguments @($monitor.Description))) }
+            if ($monitor.Error)       { [void]$sb.AppendLine((Get-TextF -Key 'DetailsError' -Arguments @($monitor.Error))) }
+            if ($monitor.Exception)   { [void]$sb.AppendLine((Get-TextF -Key 'DetailsException' -Arguments @($monitor.Exception))) }
+            if ([string]$monitor.IsStale -match '^(True|1)$') {
+                [void]$sb.AppendLine((Get-Text -Key 'DetailsStale'))
+            }
+            if ($monitor.Extended) {
+                $ext = [string]$monitor.Extended
+                if ($ext.Length -gt 1200) { $ext = $ext.Substring(0, 1200) + ' ...' }
+                [void]$sb.AppendLine((Get-TextF -Key 'DetailsExtended' -Arguments @($ext)))
+            }
+            # Konkrete Proben des HealthSets (statt <ProbeName>-Platzhalter)
+            $probes = @($Result.Probes)
+            if ($probes.Count -gt 0) {
+                $probeNames = @($probes | ForEach-Object { [string]$_.Name } | Where-Object { $_ } | Select-Object -Unique | Select-Object -First 8)
+                if ($probeNames.Count -gt 0) {
+                    [void]$sb.AppendLine((Get-TextF -Key 'DetailsProbes' -Arguments @(($probeNames -join ', '))))
+                }
+            }
+            # Live-Probe-Ergebnis (Fallback bei deaktivierten Logs)
+            $runs = @($Result.ProbeRuns)
+            if ($runs.Count -gt 0) {
+                [void]$sb.AppendLine('')
+                [void]$sb.AppendLine((Get-Text -Key 'DetailsLiveProbe'))
+                foreach ($run in $runs) {
+                    [void]$sb.AppendLine(('  [{0}] {1}' -f $run.Status, $run.Identity))
+                    if ($run.Result) { [void]$sb.AppendLine(('    Result: {0}' -f $run.Result)) }
+                    if ($run.Error)  { [void]$sb.AppendLine(('    Fehler: {0}' -f $run.Error)) }
+                    if (-not $run.Result -and -not $run.Error -and [string]$run.Status -eq 'OK') {
+                        [void]$sb.AppendLine(('    {0}' -f (Get-Text -Key 'DetailsLiveOk')))
+                    }
+                }
+            }
             [void]$sb.AppendLine('')
 
-            # Suchbegriffe: Monitorname, Monitorbasisname, HealthSet und Zielressource.
-            # (ProbeResult-Events enthalten den Probe-, MonitorResult-Events den Monitornamen.)
-            $tokens = @()
+            # Suchbegriffe, nach Relevanz getrennt: Monitor-/Probe-Namen sind stark,
+            # HealthSet/Zielressource allein sind schwach (z. B. matcht der AppPool-Name
+            # fast jede Probe). Fehler-Eintraege (Level Fehler/Warnung oder
+            # ResultType 1/4) werden zuerst gezeigt, reine Infos ausgeblendet.
+            $strongTokens = @()
             if ($monitor.Name) {
-                $tokens += [string]$monitor.Name
-                $tokens += (([string]$monitor.Name) -replace '\.?(Monitor|Responder|Probe)$', '')
+                $strongTokens += [string]$monitor.Name
+                $strongTokens += (([string]$monitor.Name) -replace '\.?(Monitor|Responder|Probe)$', '')
             }
-            if ($Result.HealthSet)         { $tokens += [string]$Result.HealthSet }
-            if ($monitor.TargetResource)   { $tokens += [string]$monitor.TargetResource }
-            $tokens = @($tokens | Where-Object { $_ } | Select-Object -Unique)
+            foreach ($pb in @($Result.Probes)) {
+                if ($pb.Name) { $strongTokens += [string]$pb.Name }
+            }
+            $strongTokens = @($strongTokens | Where-Object { $_ } | Select-Object -Unique)
+            $weakTokens = @()
+            if ($Result.HealthSet)         { $weakTokens += [string]$Result.HealthSet }
+            if ($monitor.TargetResource)   { $weakTokens += [string]$monitor.TargetResource }
+            if ($monitor.HealthSetName)    { $weakTokens += [string]$monitor.HealthSetName }
+            $weakTokens = @($weakTokens | Where-Object { $_ } | Select-Object -Unique | Where-Object { $strongTokens -notcontains $_ })
 
-            $matching = @($Result.Events | Where-Object {
-                $message = [string]$_.Message
-                $hit = $false
-                foreach ($token in $tokens) {
-                    if ($message -like ('*{0}*' -f $token)) { $hit = $true; break }
+            $scored = New-Object System.Collections.ArrayList
+            foreach ($evt in @($Result.Events)) {
+                $text = ([string]$evt.Message + ' ' + [string]$evt.Detail)
+                $strong = $false
+                foreach ($token in $strongTokens) {
+                    if ($text -like ('*{0}*' -f $token)) { $strong = $true; break }
                 }
-                $hit
-            })
-            if ($matching.Count -eq 0) {
-                [void]$sb.AppendLine((Get-Text -Key 'DetailsNoEvents'))
+                if (-not $strong) {
+                    $weak = $false
+                    foreach ($token in $weakTokens) {
+                        if ($text -like ('*{0}*' -f $token)) { $weak = $true; break }
+                    }
+                    if (-not $weak) { continue }
+                }
+                $isError = $false
+                try {
+                    if ([string]$evt.Level -match '(?i)(Fehler|Error|Warnung|Warning)') { $isError = $true }
+                    elseif ([string]$evt.Detail -match 'ResultType=[14]([^0-9]|$)') { $isError = $true }
+                } catch { }
+                [void]$scored.Add([pscustomobject]@{ Event = $evt; Strong = $strong; IsError = $isError })
+            }
+            $strongHits = @($scored | Where-Object { $_.Strong })
+            # Starke Treffer haben Vorrang; nur ohne starke Treffer auf schwache zurueckfallen
+            $relevant = @($strongHits)
+            if ($relevant.Count -eq 0) { $relevant = @($scored) }
+            $errHits  = @($relevant | Where-Object { $_.IsError })
+            $infoHits = @($relevant | Where-Object { -not $_.IsError })
+            $showErrorsOnly = (@($errHits).Count -gt 0)
+            if ($showErrorsOnly) {
+                $matching = @($errHits | ForEach-Object { $_.Event })
             } else {
-                [void]$sb.AppendLine((Get-TextF -Key 'DetailsEvents' -Arguments @($matching.Count)))
-                foreach ($logEntry in @($matching | Select-Object -First 5)) {
-                    [void]$sb.AppendLine(('  [{0}] {1} ({2})' -f $logEntry.TimeCreated, $logEntry.LogName, $logEntry.Level))
-                    [void]$sb.AppendLine(('    {0}' -f $logEntry.Message))
+                $matching = @($infoHits | ForEach-Object { $_.Event })
+            }
+            $hiddenInfos = if ($showErrorsOnly) { @($infoHits).Count } else { 0 }
+            if ($matching.Count -eq 0) {
+                $eventsRead = @($Result.Events).Count
+                if ($eventsRead -eq 0) {
+                    [void]$sb.AppendLine((Get-TextF -Key 'DetailsNoEventsRead' -Arguments @($Script:Config.EventLogHours)))
+                } else {
+                    [void]$sb.AppendLine((Get-Text -Key 'DetailsNoEvents'))
+                }
+                # Fallback: neueste Eintraege aus ManagedAvailability/Application zeigen,
+                # damit nie wieder nur eine leere Detailseite erscheint.
+                $fallback = @($Result.Events | Where-Object { ([string]$_.LogName -like '*ManagedAvailability*') -or ([string]$_.LogName -eq 'Application') } | Select-Object -First 3)
+                if ($fallback.Count -gt 0) {
+                    [void]$sb.AppendLine('')
+                    [void]$sb.AppendLine((Get-TextF -Key 'DetailsFallbackEvents' -Arguments @('ManagedAvailability/Application', $fallback.Count)))
+                    foreach ($logEntry in $fallback) {
+                        [void]$sb.AppendLine(('  [{0}] {1} ({2})' -f $logEntry.TimeCreated, $logEntry.LogName, $logEntry.Level))
+                        [void]$sb.AppendLine(('    {0}' -f $logEntry.Message))
+                        if ($logEntry.Detail) { [void]$sb.AppendLine(('    Detail: {0}' -f $logEntry.Detail)) }
+                    }
+                }
+                [void]$sb.AppendLine('')
+                # Konkreter Probe-Befehl (erste passende Probe) statt Platzhalter
+                $concreteProbe = ''
+                try {
+                    $monitorBase = ([string]$monitor.Name) -replace '\.?(Monitor|Responder)$', ''
+                    $best = @($Result.Probes | Where-Object { ([string]$_.Name) -like ('*{0}*' -f $monitorBase) } | Select-Object -First 1)
+                    if ($best.Count -gt 0 -and $best[0].Identity) { $concreteProbe = [string]$best[0].Identity }
+                } catch { }
+                if ($concreteProbe) {
+                    [void]$sb.AppendLine((Get-TextF -Key 'DetailsProbeHintConcrete' -Arguments @($concreteProbe, (Get-TargetServer))))
+                } else {
+                    [void]$sb.AppendLine((Get-TextF -Key 'DetailsProbeHint' -Arguments @($Result.HealthSet, (Get-TargetServer))))
+                }
+            } else {
+                if ($showErrorsOnly) {
+                    # Nur Fehler zeigen, reine Infos (z. B. erfolgreiche Probes,
+                    # RecoveryAction-Infos) ausblenden und nur zaehlen.
+                    [void]$sb.AppendLine((Get-TextF -Key 'DetailsErrorEvents' -Arguments @($errHits.Count)))
+                    $errTotal += @($errHits).Count
+                    foreach ($logEntry in @($matching | Select-Object -First 5)) {
+                        [void]$sb.AppendLine(('  [{0}] {1} ({2})' -f $logEntry.TimeCreated, $logEntry.LogName, $logEntry.Level))
+                        [void]$sb.AppendLine(('    {0}' -f $logEntry.Message))
+                        if ($logEntry.Detail) { [void]$sb.AppendLine(('    Detail: {0}' -f $logEntry.Detail)) }
+                    }
+                    if ($hiddenInfos -gt 0) {
+                        [void]$sb.AppendLine((Get-TextF -Key 'DetailsHiddenInfo' -Arguments @($hiddenInfos)))
+                    }
+                } else {
+                    # Keine Fehler im Fenster: nur kompakte Info-Uebersicht
+                    # (max. 3, ohne Null-Detailzeilen), damit die Seite lesbar bleibt.
+                    [void]$sb.AppendLine((Get-TextF -Key 'DetailsInfoEvents' -Arguments @($matching.Count)))
+                    foreach ($logEntry in @($matching | Select-Object -First 3)) {
+                        [void]$sb.AppendLine(('  [{0}] {1}' -f $logEntry.TimeCreated, $logEntry.Message))
+                        if ($logEntry.Detail -and $logEntry.Detail -notmatch 'Error=\[null\].*Exception=\[null\]') {
+                            [void]$sb.AppendLine(('    Detail: {0}' -f $logEntry.Detail))
+                        }
+                    }
                 }
             }
         }
 
-        if (@($Result.Errors).Count -gt 0) {
+        $disabledLogs = @($Result.Errors | Where-Object { [string]$_ -like '*LogIsEnabled=False*' })
+        $otherErrors  = @($Result.Errors | Where-Object { [string]$_ -notlike '*LogIsEnabled=False*' })
+        if ($disabledLogs.Count -gt 0 -and $errTotal -eq 0) {
+            # Nur erwaehnen, wenn kein Fehler gefunden wurde (moegliche Erklaerung);
+            # bei gefundenem Fehler ist der Hinweis nur Rauschen.
+            [void]$sb.AppendLine('')
+            [void]$sb.AppendLine((Get-Text -Key 'DetailsDisabledHint'))
+        }
+        $maDisabled = @($disabledLogs | Where-Object { [string]$_ -like '*ManagedAvailability*' }).Count -gt 0
+        if ($maDisabled -and @($Result.Events | Where-Object { [string]$_.LogName -like '*ManagedAvailability*' }).Count -eq 0) {
+            # Alle ManagedAvailability-Logs deaktiviert und keine Treffer: Reaktivierung anbieten.
+            [void]$sb.AppendLine('')
+            [void]$sb.AppendLine((Get-Text -Key 'DetailsEnableLogsHint'))
+        }
+
+        $errorsToShow = @($otherErrors)
+        if (@($Result.Events).Count -eq 0) { $errorsToShow = @($Result.Errors) }
+        if ($errorsToShow.Count -gt 0) {
             [void]$sb.AppendLine('')
             [void]$sb.AppendLine((Get-Text -Key 'DetailsErrors'))
-            foreach ($message in @($Result.Errors)) {
+            foreach ($message in $errorsToShow) {
                 [void]$sb.AppendLine(('  - {0}' -f $message))
             }
         }

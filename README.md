@@ -10,7 +10,7 @@
 [![Exchange](https://img.shields.io/badge/Exchange-2019%20%7C%20Subscription%20Edition-0078D4.svg)](https://learn.microsoft.com/exchange/)
 [![GUI](https://img.shields.io/badge/GUI-WPF-512BD4.svg?logo=dotnet&logoColor=white)](https://learn.microsoft.com/dotnet/desktop/wpf/)
 [![Sprachen](https://img.shields.io/badge/Sprachen-DE%20%7C%20EN-lightgrey.svg)](#-deutsch)
-[![Version](https://img.shields.io/badge/Version-1.1.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-1.1.6-blue.svg)](CHANGELOG.md)
 
 [Deutsch](#-deutsch) · [English](#-english) · [Changelog](CHANGELOG.md) · [Lizenz](LICENSE)
 
@@ -39,10 +39,10 @@ Das Skript zeigt ausschließlich ungesunde Health-Checks, führt auf Wunsch eine
 | **Header** | Zielserver (Standard `$env:COMPUTERNAME`), Sprachumschalter DE/EN, Darstellung Hell/Dunkel, Auto-Refresh (5 Min) |
 | **Toolbar** | „Scan starten" (`Get-HealthReport`), „Als HTML exportieren", „Report per Mail senden" |
 | **Linke Liste** | DataGrid **Unhealthy Checks** – nur Checks mit `AlertValue -ne 'Healthy'`, rote/gelbe Zeilenmarkierung für `Unhealthy`/`Degraded` |
-| **Rechter Bereich** | Fehlerdetails & Eventlogs: Monitor, Status, Zielressource, letzte Änderung, Zähler und die passenden Eventlog-Einträge |
-| **Admin-Aktionen** | **Analysieren** (`Get-ServerHealth` + Eventlogs), **Jetzt Re-Testen** (`Invoke-MonitoringProbe`), **Override setzen** (`Add-ServerMonitoringOverride`, Standard 30 Tage), **Quick Fix** (Dienst/AppPool) |
+| **Rechter Bereich** | Fehlerdetails & Eventlogs: Monitor, Status, Zielressource, erste/letzte Ausführung, Fehlertext (`Error`/`Exception`), Probenliste, Live-Probe-Ergebnis und **nur die Fehler-Einträge** (Relevanz-Ranking, Infos kompakt) |
+| **Admin-Aktionen** | **Analysieren** (`Get-ServerHealth` + Eventlogs + Live-Probe) mit **Suchfenster** (6/12/24/48/72 h), **Jetzt Re-Testen** (`Invoke-MonitoringProbe`), **Override setzen** (`Add-ServerMonitoringOverride`, Standard 30 Tage), **Quick Fix** (Dienst/AppPool) |
 | **Ausgabe** | HTML-Report mit CSS, Tabellen und Fehler-Markierungen; Mailversand über konfigurierbaren SMTP-Server |
-| **Unter der Haube** | Runspaces + `DispatcherTimer` (GUI friert nie ein), mehrsprachige Meldungen, Logging nach `C:\ScriptLog`, erzwungene Administratorrechte |
+| **Unter der Haube** | Runspaces + `DispatcherTimer` (GUI friert nie ein), mehrsprachige Meldungen, Logging nach `C:\ScriptLog`, Selbst-Elevation per UAC-Abfrage inkl. Parameterweitergabe |
 
 ### Voraussetzungen
 
@@ -64,7 +64,7 @@ Set-Location .\Exchange-HealthReport-Analyzer
 # 2) Ausführungsrichtlinie – nur für die aktuelle Sitzung
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
-# 3) Starten (PowerShell als Administrator, bevorzugt direkt auf einem Exchange-Server)
+# 3) Starten (bevorzugt direkt auf einem Exchange-Server; das Skript erhöht sich bei Bedarf selbst per UAC-Abfrage)
 .\Exchange-HealthReport-Analyzer.ps1
 ```
 
@@ -84,7 +84,7 @@ Beispiele:
 | `-LogPath` | `C:\ScriptLog` | Verzeichnis der Logdateien |
 | `-AutoRefreshMinutes` | `5` | Intervall des Auto-Refresh in Minuten |
 | `-OverrideDays` | `30` | Gültigkeitsdauer eines Monitoring-Overrides |
-| `-EventLogHours` | `12` | Zeitfenster der Eventlog-Suche in Stunden |
+| `-EventLogHours` | `24` | Zeitfenster der Eventlog-Suche in Stunden (in der GUI über das Suchfenster neben „Analysieren" umschaltbar: 6/12/24/48/72) |
 | `-MaxEventsPerLog` | `300` | Maximale Anzahl gelesener Events pro ActiveMonitoring-Log |
 | `-Theme` | `Light` | Startdarstellung: `Light` oder `Dark` |
 
@@ -92,14 +92,14 @@ Beispiele:
 
 1. Zielserver prüfen oder ändern (Standard = lokaler Computer).
 2. **Scan starten** – die Exchange-Verwaltung wird automatisch geladen, anschließend werden alle ungesunden Checks angezeigt.
-3. Zeile in der Liste markieren → **Analysieren**, um Monitore und passende Eventlogs zu sehen.
+3. Zeile in der Liste markieren → ggf. **Suchfenster** wählen → **Analysieren**, um Monitore, Live-Probe-Ergebnis und Fehler-Einträge zu sehen.
 4. Optional: **Jetzt Re-Testen**, **Override setzen (30 Tage)** oder **Quick Fix (Dienst/AppPool)** – alle Aktionen fragen vorher nach.
 5. Abschließend **Als HTML exportieren** oder **Report per Mail senden**.
 6. Nach Bedarf **Auto-Refresh** aktivieren, **Sprache** und **Darstellung** umschalten.
 
 ### Erweiterte Details
 
-- **Datenquellen:** `Get-HealthReport`, `Get-ServerHealth`, `Get-MonitoringItemIdentity`, `Get-WinEvent` auf den Logs `Microsoft-Exchange-ActiveMonitoring/ProbeResult`, `.../MonitorResult` und `.../ResponderResult`
+- **Datenquellen:** `Get-HealthReport`, `Get-ServerHealth`, `Get-MonitoringItemIdentity`, `Invoke-MonitoringProbe` (Live-Probe-Fallback), `Get-WinEvent` auf den Logs `Microsoft-Exchange-ActiveMonitoring/ProbeResult`, `.../MonitorResult`, `.../ResponderResult`, `Microsoft-Exchange-ManagedAvailability/Monitoring`, `.../RecoveryActionResults` und `Application` (Fehler/Warnungen)
 - **Override:** `Add-ServerMonitoringOverride -ItemType Monitor -PropertyName Enabled -PropertyValue 'False' -Duration <Tage>`
 - **Quick Fix:** Zuordnung HealthSet → Dienst/AppPool über `$Script:QuickFixMap` (exakter Treffer vor Teilstring), ergänzt um Monitor- und Zielressourcen-Auswertung; AppPool-Neustart lokal über `Restart-WebAppPool`, remote über `Invoke-Command`, Fallback `appcmd.exe`
 - **Asynchronität:** jede längere Operation läuft in einem Runspace; der DispatcherTimer holt das Ergebnis ab – die Oberfläche bleibt inklusive Ladeindikator reaktionsfähig
@@ -127,7 +127,7 @@ Zusätzlich gilt: Das Skript ist bewusst in **reiner ASCII-Schreibweise** gehalt
 | --- | --- |
 | „Die Exchange-Verwaltungsshell ist nicht verfügbar" | Skript läuft nicht auf einem Exchange-Server oder Snapin/Modul fehlt → Exchange Management Tools installieren bzw. auf dem Server starten |
 | Fenster erscheint nicht / WPF-Fehler | PowerShell 7 startet im MTA → das Skript startet sich automatisch in einer STA-Instanz neu; alternativ Windows PowerShell 5.1 verwenden |
-| Keine Eventlog-Treffer | Zeitfenster mit `-EventLogHours` erhöhen; prüfen, ob die ActiveMonitoring-Logs aktiviert sind (`LogIsEnabled`) |
+| Keine Eventlog-Treffer | Suchfenster in der GUI erweitern (oder `-EventLogHours`/`-MaxEventsPerLog` erhöhen); prüfen, ob die Logs zum Fehlerzeitpunkt aktiviert waren (`LogIsEnabled`) – deaktivierte Logs liefern keine alten Events |
 | Quick Fix ermittelt keinen Dienst | HealthSet nicht in `$Script:QuickFixMap` → Zuordnung ergänzen (Meldung nennt HealthSet und Monitor) |
 | AppPool-Neustart schlägt fehl | Modul `WebAdministration` fehlt oder WinRM blockiert → `appcmd.exe`-Fallback prüfen, Firewall/Remoting freigeben |
 | Mailversand scheitert | SMTP-Server, Port und SSL prüfen; Versand erfolgt ohne Zugangsdaten über die Windows-Identität |
@@ -135,7 +135,7 @@ Zusätzlich gilt: Das Skript ist bewusst in **reiner ASCII-Schreibweise** gehalt
 
 ### Sicherheit
 
-- Erzwingt Administratorrechte (`#Requires -RunAsAdministrator` plus Laufzeitprüfung)
+- Erzwingt Administratorrechte (Selbst-Elevation per UAC-Abfrage inkl. Parameterweitergabe, plus Laufzeitprüfung)
 - Ändernde Aktionen (**Override**, **Probe**, **Neustart**) erst nach Bestätigungsdialog und mit vollständiger Protokollierung
 - Keine Zugangsdaten im Skript oder in Logs; Mailversand ohne hinterlegte Credentials
 - Für den Produktivbetrieb empfohlen: Testlauf gegen einen einzelnen Server, Logverzeichnis auf ein gesichertes Laufwerk (`-LogPath`)
@@ -180,10 +180,10 @@ It lists only unhealthy health checks, performs deep-dive analysis including the
 | **Header** | Target server (default `$env:COMPUTERNAME`), language switcher DE/EN, appearance light/dark, auto-refresh (5 min) |
 | **Toolbar** | "Start scan" (`Get-HealthReport`), "Export as HTML", "Send report by mail" |
 | **Left list** | **Unhealthy Checks** data grid – only checks with `AlertValue -ne 'Healthy'`, red/yellow row highlighting for `Unhealthy`/`Degraded` |
-| **Right pane** | Error details & event logs: monitor, status, target resource, last transition time, counters and matching event log entries |
-| **Admin actions** | **Analyse** (`Get-ServerHealth` + event logs), **Re-test now** (`Invoke-MonitoringProbe`), **Set override** (`Add-ServerMonitoringOverride`, default 30 days), **Quick fix** (service/app pool) |
+| **Right pane** | Error details & event logs: monitor, status, target resource, first/last execution, error text (`Error`/`Exception`), probe list, live probe result and **only the error entries** (relevance ranking, compact infos) |
+| **Admin actions** | **Analyse** (`Get-ServerHealth` + event logs + live probe) with **time window** (6/12/24/48/72 h), **Re-test now** (`Invoke-MonitoringProbe`), **Set override** (`Add-ServerMonitoringOverride`, default 30 days), **Quick fix** (service/app pool) |
 | **Output** | HTML report with CSS, tables and error highlighting; e-mail delivery via configurable SMTP server |
-| **Under the hood** | Runspaces + `DispatcherTimer` (UI never freezes), localized messages, logging to `C:\ScriptLog`, enforced administrator rights |
+| **Under the hood** | Runspaces + `DispatcherTimer` (UI never freezes), localized messages, logging to `C:\ScriptLog`, self-elevation via UAC prompt incl. parameter passthrough |
 
 ### Requirements
 
@@ -205,7 +205,7 @@ Set-Location .\Exchange-HealthReport-Analyzer
 # 2) Execution policy – session scope only
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
-# 3) Run it (PowerShell as administrator, preferably on an Exchange server)
+# 3) Run it (preferably on an Exchange server; the script self-elevates via UAC prompt if needed)
 .\Exchange-HealthReport-Analyzer.ps1
 ```
 
@@ -225,7 +225,7 @@ Examples:
 | `-LogPath` | `C:\ScriptLog` | Directory for log files |
 | `-AutoRefreshMinutes` | `5` | Auto-refresh interval in minutes |
 | `-OverrideDays` | `30` | Validity period of a monitoring override |
-| `-EventLogHours` | `12` | Time window (hours) for event log searches |
+| `-EventLogHours` | `24` | Time window (hours) for event log searches (switchable in the GUI via the time window next to "Analyse": 6/12/24/48/72) |
 | `-MaxEventsPerLog` | `300` | Maximum number of events read per ActiveMonitoring log |
 | `-Theme` | `Light` | Initial appearance: `Light` or `Dark` |
 
@@ -233,14 +233,14 @@ Examples:
 
 1. Check or change the target server (defaults to the local machine).
 2. Click **Start scan** – Exchange management is loaded automatically, then all unhealthy checks are listed.
-3. Select a row and click **Analyse** to inspect monitors and matching event logs.
+3. Select a row, optionally adjust the **time window**, and click **Analyse** to inspect monitors, the live probe result and error entries.
 4. Optionally **Re-test now**, **Set override (30 days)** or **Quick fix (service/app pool)** – each action asks for confirmation.
 5. Finally **Export as HTML** or **Send report by mail**.
 6. Enable **Auto-refresh** and switch **language** or **appearance** as needed.
 
 ### Advanced details
 
-- **Data sources:** `Get-HealthReport`, `Get-ServerHealth`, `Get-MonitoringItemIdentity`, `Get-WinEvent` on `Microsoft-Exchange-ActiveMonitoring/ProbeResult`, `.../MonitorResult` and `.../ResponderResult`
+- **Data sources:** `Get-HealthReport`, `Get-ServerHealth`, `Get-MonitoringItemIdentity`, `Invoke-MonitoringProbe` (live probe fallback), `Get-WinEvent` on `Microsoft-Exchange-ActiveMonitoring/ProbeResult`, `.../MonitorResult`, `.../ResponderResult`, `Microsoft-Exchange-ManagedAvailability/Monitoring`, `.../RecoveryActionResults` and `Application` (errors/warnings)
 - **Override:** `Add-ServerMonitoringOverride -ItemType Monitor -PropertyName Enabled -PropertyValue 'False' -Duration <days>`
 - **Quick fix:** health set → service/app pool mapping in `$Script:QuickFixMap` (exact match before substring), extended by monitor/target resource evaluation; app pool restart locally via `Restart-WebAppPool`, remotely via `Invoke-Command`, fallback `appcmd.exe`
 - **Asynchrony:** every long-running operation runs in a runspace while a dispatcher timer collects the result – the UI stays responsive and shows a busy indicator
@@ -268,7 +268,7 @@ In addition, the script deliberately uses **pure ASCII wording** (`Auswaehlen` i
 | --- | --- |
 | "Exchange management shell is not available" | Script is not running on an Exchange server or the snap-in/module is missing → install Exchange Management Tools or run it on the server |
 | Window does not appear / WPF error | PowerShell 7 runs in MTA → the script relaunches itself in an STA instance; alternatively use Windows PowerShell 5.1 |
-| No event log matches | Increase the time window via `-EventLogHours`; verify that the ActiveMonitoring logs are enabled (`LogIsEnabled`) |
+| No event log matches | Widen the time window in the GUI (or raise `-EventLogHours`/`-MaxEventsPerLog`); verify the logs were enabled at the time of failure (`LogIsEnabled`) – disabled logs retain no old events |
 | Quick fix finds no service | Health set missing in `$Script:QuickFixMap` → extend the mapping (the message names health set and monitor) |
 | App pool restart fails | `WebAdministration` module missing or WinRM blocked → check the `appcmd.exe` fallback, allow remoting/firewall |
 | Mail delivery fails | Verify SMTP server, port and SSL; sending uses the Windows identity without stored credentials |
@@ -276,7 +276,7 @@ In addition, the script deliberately uses **pure ASCII wording** (`Auswaehlen` i
 
 ### Security
 
-- Enforces administrator rights (`#Requires -RunAsAdministrator` plus a runtime check)
+- Enforces administrator rights (self-elevation via UAC prompt incl. parameter passthrough, plus a runtime check)
 - State-changing actions (**override**, **probe**, **restart**) require confirmation and are fully logged
 - No credentials stored in the script or logs; mail delivery works without embedded credentials
 - Recommended for production: test against a single server first and place the log directory on secured storage (`-LogPath`)
