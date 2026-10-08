@@ -12,6 +12,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/de/1.1.0/) · Versionierun
 
 Legende: **Hinzugefügt** = neue Funktion · **Geändert** = Verhaltensänderung · **Behoben** = Fehlerkorrektur · **Sicherheit** = sicherheitsrelevant
 
+### [1.1.8] – 2026-10-01
+
+#### Behoben
+
+- **Starke Info-Treffer verdrängten schwache Fehler:** Erfolgreiche `DatabaseSpaceProbe`-Events (stark, aber belanglos) unterdrückten die HealthSet-weiten Low-Space-Eskalationen. Fehler werden jetzt immer aus **allen** Treffern ermittelt – starke Fehler zuerst, sonst schwache mit `HealthSet-weit`-Kennzeichnung
+- **Fremde Erfolge unterm falschen Monitor:** `DatabaseSpaceProbe/DB03`-Erfolg stand auch unter DB01/DB02/DB04. Ohne Fehler werden nur noch **zielbezogene** Infos gezeigt (`Info-Eintraege zum Ziel DBxx`), sonst ehrlich „keine Treffer" + Fallback
+
+### [1.1.7] – 2026-10-01
+
+#### Geändert
+
+- **Lesbare Eskalationsmeldungen:** `ManagedAvailability/Monitoring`-Texte werden bereinigt – HTML-Markup (`<b>`, `<br/>`, `<table>`…) entfernt, `REPLACE_PERCENT_SIGN` → `%`, angehängte (ggf. veraltete) Monitor-Übersichtstabelle ab `Status aller Monitore` abgeschnitten; übrig bleibt der eigentliche Fehlertext (Volumen, Current-/Threshold-Werte)
+- **Ehrliche Zuordnung:** Treffer nur über HealthSet-/Zielressourcen-Namen erscheinen als `Fehler-Eintraege (HealthSet-weit, N)` statt als Monitor-Fehler
+- **Deduplizierung:** identische Einträge (z. B. `InvokeNow`-Wiederholungen) erscheinen einmal mit Zähler (`Nx identisch, neuester gezeigt`)
+- **Live-Probe-Status:** `[OK]` hieß nur „Cmdlet lief" – mit Fehlertext steht jetzt `[FEHLER]` da
+
 ### [1.1.6] – 2026-09-30
 
 #### Hinzugefügt
@@ -130,6 +146,22 @@ Legende: **Hinzugefügt** = neue Funktion · **Geändert** = Verhaltensänderung
 ## 🇬🇧 English
 
 Legend: **Added** = new feature · **Changed** = behaviour change · **Fixed** = bug fix · **Security** = security related
+
+### [1.1.8] – 2026-10-01
+
+#### Fixed
+
+- **Strong info matches suppressed weak errors:** successful `DatabaseSpaceProbe` events (strong but irrelevant) hid the health-set-wide low-space escalations. Errors are now always determined from **all** matches – strong errors first, otherwise weak ones labelled `health-set-wide`
+- **Foreign successes under the wrong monitor:** `DatabaseSpaceProbe/DB03` success was shown under DB01/DB02/DB04 too. Without errors, only **target-specific** infos are shown (`Informational entries for target DBxx`), otherwise honestly "no matches" + fallback
+
+### [1.1.7] – 2026-10-01
+
+#### Changed
+
+- **Readable escalation messages:** `ManagedAvailability/Monitoring` texts are cleaned – HTML markup (`<b>`, `<br/>`, `<table>`…) removed, `REPLACE_PERCENT_SIGN` → `%`, appended (possibly stale) monitor overview table cut off at `Status of all monitors`; only the actual error text remains (volume, current/threshold values)
+- **Honest attribution:** matches only via health set/target resource name appear as `Error entries (health-set-wide, N)` instead of monitor errors
+- **Deduplication:** identical entries (e.g. `InvokeNow` repetitions) appear once with a counter (`Nx identical, newest shown`)
+- **Live probe status:** `[OK]` only meant "cmdlet ran" – with error text it now shows `[FAILED]`
 
 ### [1.1.6] – 2026-09-30
 

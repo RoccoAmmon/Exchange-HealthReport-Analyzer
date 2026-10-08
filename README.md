@@ -10,7 +10,7 @@
 [![Exchange](https://img.shields.io/badge/Exchange-2019%20%7C%20Subscription%20Edition-0078D4.svg)](https://learn.microsoft.com/exchange/)
 [![GUI](https://img.shields.io/badge/GUI-WPF-512BD4.svg?logo=dotnet&logoColor=white)](https://learn.microsoft.com/dotnet/desktop/wpf/)
 [![Sprachen](https://img.shields.io/badge/Sprachen-DE%20%7C%20EN-lightgrey.svg)](#-deutsch)
-[![Version](https://img.shields.io/badge/Version-1.1.6-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-1.1.8-blue.svg)](CHANGELOG.md)
 
 [Deutsch](#-deutsch) · [English](#-english) · [Changelog](CHANGELOG.md) · [Lizenz](LICENSE)
 

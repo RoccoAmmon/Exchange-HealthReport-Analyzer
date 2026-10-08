@@ -58,8 +58,8 @@
 
 .NOTES
     Autor   : Rocco Ammon
-    Datum   : 2026-09-30
-    Version : 1.1.6
+    Datum   : 2026-10-01
+    Version : 1.1.8
     Hinweis : Muss auf einem Exchange-Server (administrativ) ausgefuehrt werden.
               Geprueft gegen Exchange Server 2019 / Subscription Edition (Managed Availability).
 #>
@@ -118,7 +118,7 @@ try {
 
 #region Konfiguration / Variablen
 $Script:Config = @{
-    AppVersion         = '1.1.6'
+    AppVersion         = '1.1.8'
     LogPath            = $LogPath
     LogFile            = (Join-Path $LogPath ('Exchange-HealthReport-Analyzer_{0:yyyyMMdd}.log' -f (Get-Date)))
     TargetServer       = if ([string]::IsNullOrWhiteSpace($TargetServer)) { $env:COMPUTERNAME } else { $TargetServer }
@@ -316,7 +316,11 @@ $Script:T = @{
         DetailsLiveProbe      = 'Live-Probe (direkt ausgefuehrt):'
         DetailsLiveOk         = 'Probe erfolgreich, kein Fehlertext (Monitor ggf. noch nicht zurueckgesetzt).'
         DetailsErrorEvents    = 'Fehler-Eintraege ({0}):'
-        DetailsInfoEvents     = 'Info-Eintraege ({0}, kein Fehler im Zeitfenster):'
+        DetailsErrorEventsWeak = 'Fehler-Eintraege (HealthSet-weit, {0}):'
+        DetailsDupes          = ' ({0}x identisch, neuester gezeigt)'
+        DetailsProbeFailed    = 'FEHLER'
+        DetailsRunError       = 'Fehler: {0}'
+        DetailsTargetInfo     = 'Info-Eintraege zum Ziel {0} ({1}):'
         DetailsHiddenInfo     = '(+ {0} weitere Informations-Eintraege ausgeblendet.)'
         DetailsNoEventsRead   = 'Keine Events lesbar: alle abgefragten Logs sind deaktiviert oder leer im Zeitfenster ({0}h). Siehe Live-Probe oben und Hinweise unten.'
         DetailsProbeHintConcrete = 'Tipp: Probe manuell starten: Invoke-MonitoringProbe {0} -Server {1} | Format-List'
@@ -421,7 +425,11 @@ $Script:T = @{
         DetailsLiveProbe      = 'Live probe (executed directly):'
         DetailsLiveOk         = 'Probe succeeded, no error text (monitor may not have reset yet).'
         DetailsErrorEvents    = 'Error entries ({0}):'
-        DetailsInfoEvents     = 'Informational entries ({0}, no error in time window):'
+        DetailsErrorEventsWeak = 'Error entries (health-set-wide, {0}):'
+        DetailsDupes          = ' ({0}x identical, newest shown)'
+        DetailsProbeFailed    = 'FAILED'
+        DetailsRunError       = 'Error: {0}'
+        DetailsTargetInfo     = 'Informational entries for target {0} ({1}):'
         DetailsHiddenInfo     = '(+ {0} further informational entries hidden.)'
         DetailsNoEventsRead   = 'No events readable: all queried logs are disabled or empty in the time window ({0}h). See live probe above and hints below.'
         DetailsProbeHintConcrete = 'Tip: run the probe manually: Invoke-MonitoringProbe {0} -Server {1} | Format-List'
@@ -1941,6 +1949,24 @@ function Get-TimeValue($obj, [string[]]$names) {
     }
     return ''
 }
+function Clean-EventMessage([string]$text) {
+    # Eskalationsmeldungen aus ManagedAvailability/Monitoring enthalten HTML-Markup
+    # (<b>, <br/>, <table>...) und eine angehaengte Monitor-Uebersichtstabelle
+    # (ggf. veraltet und irrefuehrend). Beides wird entfernt, uebrig bleibt der
+    # eigentliche Fehlertext.
+    if ([string]::IsNullOrWhiteSpace($text)) { return '' }
+    try {
+        $text = $text -replace 'REPLACE_PERCENT_SIGN', '%'
+        $text = $text -replace '(?i)</?(br|hr|p|div|table|tbody|thead|tr|td|th|b|i|u|span|font|a)(\s[^>]*)?/?>', ' '
+        foreach ($marker in @('Status aller Monitore', 'Status of all monitors')) {
+            $idx = $text.IndexOf($marker, [System.StringComparison]::OrdinalIgnoreCase)
+            if ($idx -gt 0) { $text = $text.Substring(0, $idx) }
+        }
+        $text = $text.TrimEnd('-', ' ', "`t")
+        $text = $text -replace '\s{2,}', ' '
+        return $text.Trim()
+    } catch { return $text }
+}
 
 # 1) Ungesunde Monitore des HealthSets ermitteln.
 # Hinweis: Get-ServerHealth kennt KEIN RepeatCount/RedAlertCount (das sind
@@ -2084,8 +2110,9 @@ foreach ($logName in ($logsToRead | Select-Object -Unique)) {
     }
     foreach ($e in $evts) {
         $message = [string]$e.Message
-        if ($message.Length -gt 1500) { $message = $message.Substring(0, 1500) + ' ...' }
         $message = $message -replace "`r?`n", ' '
+        $message = Clean-EventMessage $message
+        if ($message.Length -gt 1500) { $message = $message.Substring(0, 1500) + ' ...' }
         # Echter Fehlertext steckt bei ActiveMonitoring-Events im XML (Error,
         # Exception, ResultName) - Message allein ist oft nur generisch
         # ("Probe result (Name=...)"). Daher XML-Details mit auslesen.
@@ -2223,9 +2250,13 @@ function Show-AnalyseResult {
                 [void]$sb.AppendLine('')
                 [void]$sb.AppendLine((Get-Text -Key 'DetailsLiveProbe'))
                 foreach ($run in $runs) {
-                    [void]$sb.AppendLine(('  [{0}] {1}' -f $run.Status, $run.Identity))
+                    # Status aus dem Probe-Inhalt ableiten: [OK] heisst nur, dass das
+                    # Cmdlet lief - ein Fehlertext bedeutet trotzdem einen Fehlschlag.
+                    $runState = [string]$run.Status
+                    if (-not [string]::IsNullOrWhiteSpace([string]$run.Error)) { $runState = Get-Text -Key 'DetailsProbeFailed' }
+                    [void]$sb.AppendLine(('  [{0}] {1}' -f $runState, $run.Identity))
                     if ($run.Result) { [void]$sb.AppendLine(('    Result: {0}' -f $run.Result)) }
-                    if ($run.Error)  { [void]$sb.AppendLine(('    Fehler: {0}' -f $run.Error)) }
+                    if ($run.Error)  { [void]$sb.AppendLine((Get-TextF -Key 'DetailsRunError' -Arguments @($run.Error))) }
                     if (-not $run.Result -and -not $run.Error -and [string]$run.Status -eq 'OK') {
                         [void]$sb.AppendLine(('    {0}' -f (Get-Text -Key 'DetailsLiveOk')))
                     }
@@ -2273,19 +2304,46 @@ function Show-AnalyseResult {
                 } catch { }
                 [void]$scored.Add([pscustomobject]@{ Event = $evt; Strong = $strong; IsError = $isError })
             }
-            $strongHits = @($scored | Where-Object { $_.Strong })
-            # Starke Treffer haben Vorrang; nur ohne starke Treffer auf schwache zurueckfallen
-            $relevant = @($strongHits)
-            if ($relevant.Count -eq 0) { $relevant = @($scored) }
-            $errHits  = @($relevant | Where-Object { $_.IsError })
-            $infoHits = @($relevant | Where-Object { -not $_.IsError })
-            $showErrorsOnly = (@($errHits).Count -gt 0)
-            if ($showErrorsOnly) {
-                $matching = @($errHits | ForEach-Object { $_.Event })
+            # Fehler immer aus ALLEN Treffern (stark+schwach): Ein starker Info-Treffer
+            # darf einen schwachen Fehler-Treffer nicht verdraengen (z. B. MailboxSpace:
+            # DatabaseSpaceProbe-Erfolge vs. HealthSet-weite Low-Space-Eskalation).
+            # Schwache Fehler sind HealthSet-weite Aussagen und werden als solche
+            # gekennzeichnet, nicht als Monitor-Fehler.
+            $errStrong = @($scored | Where-Object { $_.Strong -and $_.IsError })
+            $errWeak   = @($scored | Where-Object { -not $_.Strong -and $_.IsError })
+            $infoAll   = @($scored | Where-Object { -not $_.IsError })
+            $showErrorsOnly = ((@($errStrong).Count + @($errWeak).Count) -gt 0)
+            $weakOnly = ((@($errStrong).Count -eq 0) -and (@($errWeak).Count -gt 0))
+            if ($showErrorsOnly -and -not $weakOnly) {
+                $errHits = $errStrong
+            } elseif ($showErrorsOnly) {
+                $errHits = $errWeak
             } else {
-                $matching = @($infoHits | ForEach-Object { $_.Event })
+                $errHits = @()
             }
-            $hiddenInfos = if ($showErrorsOnly) { @($infoHits).Count } else { 0 }
+            $matching = @($errHits | ForEach-Object { $_.Event })
+            # Ohne Fehler: nur zielbezogene Infos (enthalten die Zielressource) - ein
+            # fremder Probe-Erfolg (z. B. DB03 unter DB01) wird nicht mehr angezeigt.
+            $targetOnly = $false
+            if (-not $showErrorsOnly -and $monitor.TargetResource) {
+                $targetInfos = @($infoAll | Where-Object {
+                    (([string]$_.Event.Message + ' ' + [string]$_.Event.Detail) -like ('*{0}*' -f $monitor.TargetResource))
+                })
+                if (@($targetInfos).Count -gt 0) { $targetOnly = $true; $matching = @($targetInfos | ForEach-Object { $_.Event }) }
+            }
+            # Identische Eintraege (z. B. InvokeNow-Wiederholungen) zusammenfassen:
+            # neuester wird gezeigt, Rest nur gezaehlt.
+            $shown = @()
+            $seen = @{}
+            foreach ($evt in $matching) {
+                $dedupeKey = ([string]$evt.Message + '||' + [string]$evt.Detail)
+                if ($seen.ContainsKey($dedupeKey)) { $seen[$dedupeKey].Count++ }
+                else { $seen[$dedupeKey] = [pscustomobject]@{ Event = $evt; Count = 1 }; $shown += $seen[$dedupeKey] }
+            }
+            # Ausgeblendete Infos = alle Infos minus angezeigte (Fehlerzweige zeigen
+            # keine Infos, der Zielzweig max. 3).
+            $hiddenInfos = @($infoAll).Count
+            if ($targetOnly) { $hiddenInfos = [Math]::Max(0, $hiddenInfos - @($shown | Select-Object -First 3).Count) }
             if ($matching.Count -eq 0) {
                 $eventsRead = @($Result.Events).Count
                 if ($eventsRead -eq 0) {
@@ -2322,25 +2380,37 @@ function Show-AnalyseResult {
                 if ($showErrorsOnly) {
                     # Nur Fehler zeigen, reine Infos (z. B. erfolgreiche Probes,
                     # RecoveryAction-Infos) ausblenden und nur zaehlen.
-                    [void]$sb.AppendLine((Get-TextF -Key 'DetailsErrorEvents' -Arguments @($errHits.Count)))
+                    if ($weakOnly) {
+                        [void]$sb.AppendLine((Get-TextF -Key 'DetailsErrorEventsWeak' -Arguments @($errHits.Count)))
+                    } else {
+                        [void]$sb.AppendLine((Get-TextF -Key 'DetailsErrorEvents' -Arguments @($errHits.Count)))
+                    }
                     $errTotal += @($errHits).Count
-                    foreach ($logEntry in @($matching | Select-Object -First 5)) {
+                    foreach ($row in @($shown | Select-Object -First 5)) {
+                        $logEntry = $row.Event
                         [void]$sb.AppendLine(('  [{0}] {1} ({2})' -f $logEntry.TimeCreated, $logEntry.LogName, $logEntry.Level))
-                        [void]$sb.AppendLine(('    {0}' -f $logEntry.Message))
+                        $dupeSuffix = if ($row.Count -gt 1) { Get-TextF -Key 'DetailsDupes' -Arguments @($row.Count) } else { '' }
+                        [void]$sb.AppendLine(('    {0}{1}' -f $logEntry.Message, $dupeSuffix))
                         if ($logEntry.Detail) { [void]$sb.AppendLine(('    Detail: {0}' -f $logEntry.Detail)) }
                     }
                     if ($hiddenInfos -gt 0) {
                         [void]$sb.AppendLine((Get-TextF -Key 'DetailsHiddenInfo' -Arguments @($hiddenInfos)))
                     }
                 } else {
-                    # Keine Fehler im Fenster: nur kompakte Info-Uebersicht
-                    # (max. 3, ohne Null-Detailzeilen), damit die Seite lesbar bleibt.
-                    [void]$sb.AppendLine((Get-TextF -Key 'DetailsInfoEvents' -Arguments @($matching.Count)))
-                    foreach ($logEntry in @($matching | Select-Object -First 3)) {
-                        [void]$sb.AppendLine(('  [{0}] {1}' -f $logEntry.TimeCreated, $logEntry.Message))
+                    # Keine Fehler im Fenster: nur zielbezogene Infos im vollen Format
+                    # (mit Quelle/Level). Fremde Erfolge erscheinen hier nicht mehr.
+                    [void]$sb.AppendLine((Get-TextF -Key 'DetailsTargetInfo' -Arguments @($monitor.TargetResource, $matching.Count)))
+                    foreach ($row in @($shown | Select-Object -First 3)) {
+                        $logEntry = $row.Event
+                        [void]$sb.AppendLine(('  [{0}] {1} ({2})' -f $logEntry.TimeCreated, $logEntry.LogName, $logEntry.Level))
+                        $dupeSuffix = if ($row.Count -gt 1) { Get-TextF -Key 'DetailsDupes' -Arguments @($row.Count) } else { '' }
+                        [void]$sb.AppendLine(('    {0}{1}' -f $logEntry.Message, $dupeSuffix))
                         if ($logEntry.Detail -and $logEntry.Detail -notmatch 'Error=\[null\].*Exception=\[null\]') {
                             [void]$sb.AppendLine(('    Detail: {0}' -f $logEntry.Detail))
                         }
+                    }
+                    if ($hiddenInfos -gt 0) {
+                        [void]$sb.AppendLine((Get-TextF -Key 'DetailsHiddenInfo' -Arguments @($hiddenInfos)))
                     }
                 }
             }
