@@ -58,7 +58,7 @@ Das Skript zeigt ausschließlich ungesunde Health-Checks, führt auf Wunsch eine
 
 ```powershell
 # 1) Repository klonen
-git clone https://github.com/RoccoAmmon/Exchange-HealthReport-Analyzer.git
+git clone https://gitlab.com/RoccoAmmon/Exchange-HealthReport-Analyzer.git
 Set-Location .\Exchange-HealthReport-Analyzer
 
 # 2) Ausführungsrichtlinie – nur für die aktuelle Sitzung
@@ -111,7 +111,7 @@ Kurz: **Das Skript braucht kein BOM, solange es reines ASCII ist – bei Umlaute
 | Datei | Empfehlung | Begründung |
 | --- | --- | --- |
 | `Exchange-HealthReport-Analyzer.ps1` | UTF-8 **mit BOM** (so ausgeliefert) | Windows PowerShell 5.1 interpretiert Skriptdateien **ohne** BOM als ANSI/Windows-1252. Umlaute, „ß“ oder Sonderzeichen würden dann verstümmelt. PowerShell 7 liest standardmäßig UTF-8 (BOM optional). |
-| `README.md`, `CHANGELOG.md` | UTF-8 **ohne** BOM | GitHub und Markdown-Renderer erwarten UTF-8 ohne BOM. |
+| `README.md`, `CHANGELOG.md` | UTF-8 **ohne** BOM | GitLab und Markdown-Renderer erwarten UTF-8 ohne BOM. |
 
 Zusätzlich gilt: Das Skript ist bewusst in **reiner ASCII-Schreibweise** gehalten (`Auswaehlen` statt `Auswählen`), damit es in jeder Umgebung und mit jeder Speicherung ohne BOM korrekt läuft. Wer Umlaute ergänzen möchte, speichert die Datei als **UTF-8 mit BOM** – z. B. in VS Code unten rechts auf „UTF-8" klicken → *Save with Encoding* → *UTF-8 with BOM*.
 
@@ -153,7 +153,7 @@ docs/screenshot-dark.png             Screenshot der dunklen Darstellung
 
 ### Mitwirken, Lizenz, Autor
 
-- Issues und Pull Requests: <https://github.com/RoccoAmmon/Exchange-HealthReport-Analyzer/issues>
+- Issues und Pull Requests: <https://gitlab.com/RoccoAmmon/Exchange-HealthReport-Analyzer/-/issues>
 - Lizenz: **MIT** – siehe [LICENSE](LICENSE)
 - Autor: **Rocco Ammon**
 
@@ -199,7 +199,7 @@ It lists only unhealthy health checks, performs deep-dive analysis including the
 
 ```powershell
 # 1) Clone the repository
-git clone https://github.com/RoccoAmmon/Exchange-HealthReport-Analyzer.git
+git clone https://gitlab.com/RoccoAmmon/Exchange-HealthReport-Analyzer.git
 Set-Location .\Exchange-HealthReport-Analyzer
 
 # 2) Execution policy – session scope only
@@ -252,7 +252,7 @@ Short answer: **the script does not need a BOM as long as it is pure ASCII – w
 | File | Recommendation | Reason |
 | --- | --- | --- |
 | `Exchange-HealthReport-Analyzer.ps1` | UTF-8 **with BOM** (as shipped) | Windows PowerShell 5.1 reads script files **without** a BOM as ANSI/Windows-1252, so umlauts and special characters would be garbled. PowerShell 7 reads UTF-8 by default (BOM optional). |
-| `README.md`, `CHANGELOG.md` | UTF-8 **without** BOM | GitHub and Markdown renderers expect UTF-8 without a BOM. |
+| `README.md`, `CHANGELOG.md` | UTF-8 **without** BOM | GitLab and Markdown renderers expect UTF-8 without a BOM. |
 
 In addition, the script deliberately uses **pure ASCII wording** (`Auswaehlen` instead of `Auswählen`) so it runs correctly in any environment regardless of how it is stored. If you want to add umlauts, save the file as **UTF-8 with BOM** – in VS Code click "UTF-8" in the status bar → *Save with Encoding* → *UTF-8 with BOM*.
 
@@ -294,7 +294,7 @@ docs/screenshot-dark.png             Dark theme screenshot
 
 ### Contributing, license, author
 
-- Issues and pull requests: <https://github.com/RoccoAmmon/Exchange-HealthReport-Analyzer/issues>
+- Issues and pull requests: <https://gitlab.com/RoccoAmmon/Exchange-HealthReport-Analyzer/-/issues>
 - License: **MIT** – see [LICENSE](LICENSE)
 - Author: **Rocco Ammon**
 
